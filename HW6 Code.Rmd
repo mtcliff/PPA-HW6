@@ -162,11 +162,11 @@ weather.Panel <-
               Precipitation = sum(p01i),
               Wind_Speed = max(sknt),
               Humidity = max(relh),
-              Heat_Index = -42.379 + 2.04901523 * Temperature + 10.14333127 * Humidity - 
+              Heat_Index = ifelse(Temperature >= 80,-42.379 + 2.04901523 * Temperature + 10.14333127 * Humidity - 
                 0.22475541 * Temperature * Humidity 
               - 0.00683783 * Temperature^2 - 0.05481717 * Humidity^2 + 0.00122874 * 
                 Temperature^2 * Humidity + 0.00085282 * Temperature
-              * Humidity^2 - 0.00000199 * Temperature^2 * Humidity^2) %>%
+              * Humidity^2 - 0.00000199 * Temperature^2 * Humidity^2, Temperature)) %>%
     mutate(Temperature = ifelse(Temperature == 0, 42, Temperature))
 
 glimpse(weather.Panel)
@@ -196,4 +196,78 @@ ggplot(dat_census %>%
        x="Date", 
        y="Number of trips")+
   plotTheme
+```
+
+```{r mean_trips_hist, warning = FALSE, message = FALSE }
+dat_census %>%
+        mutate(time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush"))%>%
+         group_by(interval60, start_station, time_of_day) %>%
+         tally()%>%
+  group_by(start_station, time_of_day)%>%
+  summarize(mean_trips = mean(n))%>%
+  ggplot()+
+  geom_histogram(aes(mean_trips), binwidth = 1)+
+  labs(title="Mean Number of Hourly Trips Per Station. Philadelphia, Aug-Sep, 2023",
+       x="Number of trips", 
+       y="Frequency")+
+  facet_wrap(~time_of_day)+
+  plotTheme
+```
+
+```{r trips_station_dotw }
+ggplot(dat_census %>%
+         group_by(interval60, start_station) %>%
+         tally())+
+  geom_histogram(aes(n), binwidth = 5)+
+  labs(title="Bike share trips per hr by station. Philadelphia, Aug-Sep, 2023",
+       x="Trip Counts", 
+       y="Number of Stations")+
+  plotTheme
+```
+
+```{r trips_hour_dotw }
+ggplot(dat_census %>% mutate(hour = hour(timestamp)))+
+     geom_freqpoly(aes(hour, color = dotw), binwidth = 1)+
+  labs(title="Bike share trips in Philadelphia, by day of the week, Aug-Sep, 2023",
+       x="Hour", 
+       y="Trip Counts")+
+     plotTheme
+
+
+ggplot(dat_census %>% 
+         mutate(hour = hour(timestamp),
+                weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday")))+
+     geom_freqpoly(aes(hour, color = weekend), binwidth = 1)+
+  labs(title="Bike share trips in Philadelphia - weekend vs weekday, Aug-Sep, 2023",
+       x="Hour", 
+       y="Trip Counts")+
+     plotTheme
+```
+
+
+```{r origin_map }
+ggplot()+
+  geom_sf(data = tracts %>%
+          st_transform(crs=4326))+
+  geom_point(data = dat_census %>% 
+            mutate(hour = hour(timestamp),
+                weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+                time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush"))%>%
+              group_by(start_station, start_lat, start_lon, weekend, time_of_day) %>%
+              tally(),
+            aes(x=start_lon, y = start_lat, color = n), 
+            fill = "transparent", alpha = 0.4, size = 0.3)+
+  scale_colour_viridis(direction = -1,
+  discrete = FALSE, option = "D")+
+  ylim(min(dat_census$start_lat), max(dat_census$start_lat))+
+  xlim(min(dat_census$start_lon), max(dat_census$start_lon))+
+  facet_grid(weekend ~ time_of_day)+
+  labs(title="Bike share trips per hr by station. Philadelphia, Aug-Sep, 2023")+
+  mapTheme
 ```
