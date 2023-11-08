@@ -1,0 +1,199 @@
+---
+title: "Indego Bike Share Prediction"
+author: "Michael Clifford and Shuai Wang"
+date: "November 17, 2023"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup_13, cache=TRUE, message=FALSE}
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(tigris)
+library(tidycensus)
+library(viridis)
+library(riem)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(RSocrata)
+
+plotTheme <- theme(
+  plot.title =element_text(size=12),
+  plot.subtitle = element_text(size=8),
+  plot.caption = element_text(size = 6),
+  axis.text.x = element_text(size = 10, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 10),
+  axis.title.y = element_text(size = 10),
+  # Set the entire chart region to blank
+  panel.background=element_blank(),
+  plot.background=element_blank(),
+  #panel.border=element_rect(colour="#F0F0F0"),
+  # Format the grid
+  panel.grid.major=element_line(colour="#D0D0D0",size=.2),
+  axis.ticks=element_blank())
+
+mapTheme <- theme(plot.title =element_text(size=12),
+                  plot.subtitle = element_text(size=8),
+                  plot.caption = element_text(size = 6),
+                  axis.line=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.text.y=element_blank(),
+                  axis.ticks=element_blank(),
+                  axis.title.x=element_blank(),
+                  axis.title.y=element_blank(),
+                  panel.background=element_blank(),
+                  panel.border=element_blank(),
+                  panel.grid.major=element_line(colour = 'transparent'),
+                  panel.grid.minor=element_blank(),
+                  legend.direction = "vertical", 
+                  legend.position = "right",
+                  plot.margin = margin(1, 1, 1, 1, 'cm'),
+                  legend.key.height = unit(1, "cm"), legend.key.width = unit(0.2, "cm"))
+
+palette5 <- c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c")
+palette4 <- c("#D2FBD4","#92BCAB","#527D82","#123F5A")
+palette2 <- c("#6baed6","#08519c")
+```
+
+```{r install_census_API_key, warning = FALSE, include=FALSE, eval = TRUE}
+# Install Census API Key
+tidycensus::census_api_key("730e334cd384273fdcda9984e41c6444518d82d6", overwrite = TRUE)
+```
+
+```{r read_dat }
+dat <- read.csv("indego-trips-2023-q3-2.csv")
+
+dat$timestamp <- mdy_hm(dat$start_time)
+
+dat <- dat[dat$timestamp >= ymd_hms("2023-08-06T00:00:00Z") &
+                      dat$timestamp < ymd_hms("2023-09-10T00:00:00Z"), ]
+```
+
+```{r time_bins }
+dat2 <- dat %>%
+  mutate(interval60 = floor_date(ymd_hms(timestamp), unit = "hour"),
+         interval15 = floor_date(ymd_hms(timestamp), unit = "15 mins"),
+         week = week(interval60),
+         dotw = wday(interval60, label=TRUE))
+```
+
+```{r get_census, message=FALSE, warning=FALSE, cache=TRUE, results = 'hide'}
+census <- 
+  get_acs(geography = "tract", 
+          variables = c("B01003_001", "B19013_001", 
+                        "B02001_002", "B08013_001",
+                        "B08012_001", "B08301_001", 
+                        "B08301_010", "B01002_001"), 
+          year = 2021, 
+          state = "PA", 
+          geometry = TRUE, 
+          county=c("Philadelphia"),
+          output = "wide") %>%
+  rename(Total_Pop =  B01003_001E,
+         Med_Inc = B19013_001E,
+         Med_Age = B01002_001E,
+         White_Pop = B02001_002E,
+         Travel_Time = B08013_001E,
+         Num_Commuters = B08012_001E,
+         Means_of_Transport = B08301_001E,
+         Total_Public_Trans = B08301_010E) %>%
+  select(Total_Pop, Med_Inc, White_Pop, Travel_Time,
+         Means_of_Transport, Total_Public_Trans,
+         Med_Age,
+         GEOID, geometry) %>%
+  mutate(Percent_White = White_Pop / Total_Pop,
+         Mean_Commute_Time = Travel_Time / Total_Public_Trans,
+         Percent_Taking_Public_Trans = Total_Public_Trans / Means_of_Transport)
+```
+
+```{r extract_geometries }
+tracts <- 
+  census %>%
+  as.data.frame() %>%
+  distinct(GEOID, .keep_all = TRUE) %>%
+  select(GEOID, geometry) %>% 
+  st_sf
+
+```
+
+```{r add_census_tracts , message = FALSE, warning = FALSE}
+dat_census <- st_join(dat2 %>% 
+          filter(is.na(start_lon) == FALSE &
+                   is.na(start_lat) == FALSE &
+                   is.na(end_lat) == FALSE &
+                   is.na(end_lon) == FALSE) %>%
+          st_as_sf(., coords = c("start_lon", "start_lat"), crs = 4326),
+        tracts %>%
+          st_transform(crs=4326),
+        join=st_intersects,
+              left = TRUE) %>%
+  rename(Origin.Tract = GEOID) %>%
+  mutate(start_lon = unlist(map(geometry, 1)),
+         start_lat = unlist(map(geometry, 2)))%>%
+  as.data.frame() %>%
+  select(-geometry)%>%
+  st_as_sf(., coords = c("end_lon", "end_lat"), crs = 4326) %>%
+  st_join(., tracts %>%
+            st_transform(crs=4326),
+          join=st_intersects,
+          left = TRUE) %>%
+  rename(Destination.Tract = GEOID)  %>%
+  mutate(end_lon = unlist(map(geometry, 1)),
+         end_lat = unlist(map(geometry, 2)))%>%
+  as.data.frame() %>%
+  select(-geometry)
+```
+
+```{r import_weather, message = FALSE, warning = FALSE }
+weather.Panel <- 
+  riem_measures(station = "PHL", date_start = "2023-08-06", date_end = "2023-09-09") %>%
+  dplyr::select(valid, tmpf, p01i, sknt, relh)%>%
+  replace(is.na(.), 0) %>%
+    mutate(interval60 = ymd_h(substr(valid,1,13))) %>%
+    mutate(week = week(interval60),
+           dotw = wday(interval60, label=TRUE)) %>%
+    group_by(interval60) %>%
+    summarize(Temperature = max(tmpf),
+              Precipitation = sum(p01i),
+              Wind_Speed = max(sknt),
+              Humidity = max(relh),
+              Heat_Index = -42.379 + 2.04901523 * Temperature + 10.14333127 * Humidity - 
+                0.22475541 * Temperature * Humidity 
+              - 0.00683783 * Temperature^2 - 0.05481717 * Humidity^2 + 0.00122874 * 
+                Temperature^2 * Humidity + 0.00085282 * Temperature
+              * Humidity^2 - 0.00000199 * Temperature^2 * Humidity^2) %>%
+    mutate(Temperature = ifelse(Temperature == 0, 42, Temperature))
+
+glimpse(weather.Panel)
+```
+
+```{r plot_weather, catche = TRUE}
+grid.arrange(
+  ggplot(weather.Panel, aes(interval60,Precipitation)) + geom_line() + 
+  labs(title="Percipitation", x="Hour", y="Perecipitation") + plotTheme,
+  ggplot(weather.Panel, aes(interval60,Wind_Speed)) + geom_line() + 
+    labs(title="Wind Speed", x="Hour", y="Wind Speed") + plotTheme,
+  ggplot(weather.Panel, aes(interval60,Temperature)) + geom_line() + 
+    labs(title="Temperature", x="Hour", y="Temperature") + plotTheme,
+  ggplot(weather.Panel, aes(interval60,Humidity)) + geom_line() + 
+    labs(title="Humidity", x="Hour", y="Humidity") + plotTheme,
+    ggplot(weather.Panel, aes(interval60,Heat_Index)) + geom_line() + 
+    labs(title="Heat Index", x="Hour", y="Heat Index") + plotTheme,
+  top="Weather Data - Philadelphia PHL - August-September, 2023")
+```
+
+```{r trip_timeseries }
+ggplot(dat_census %>%
+         group_by(interval60) %>%
+         tally())+
+  geom_line(aes(x = interval60, y = n))+
+  labs(title="Bike share trips per hr. Philadelphia, Aug-Sep, 2023",
+       x="Date", 
+       y="Number of trips")+
+  plotTheme
+```
