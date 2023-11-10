@@ -21,6 +21,11 @@ library(gridExtra)
 library(knitr)
 library(kableExtra)
 library(RSocrata)
+library(mapview)
+library(FNN)
+
+root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
+source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
 
 plotTheme <- theme(
   plot.title =element_text(size=12),
@@ -56,6 +61,7 @@ mapTheme <- theme(plot.title =element_text(size=12),
                   legend.key.height = unit(1, "cm"), legend.key.width = unit(0.2, "cm"))
 
 palette5 <- c("#eff3ff","#bdd7e7","#6baed6","#3182bd","#08519c")
+palette5_2 <- c("#08519c", "#3182bd", "#6baed6", "#bdd7e7", "#eff3ff")
 palette4 <- c("#D2FBD4","#92BCAB","#527D82","#123F5A")
 palette2 <- c("#6baed6","#08519c")
 ```
@@ -71,7 +77,7 @@ dat <- read.csv("indego-trips-2023-q3-2.csv")
 dat$timestamp <- mdy_hm(dat$start_time)
 
 dat <- dat[dat$timestamp >= ymd_hms("2023-08-06T00:00:00Z") &
-                      dat$timestamp < ymd_hms("2023-09-10T00:00:00Z"), ]
+                      dat$timestamp <= ymd_hms("2023-09-10T00:00:00Z"), ]
 ```
 
 ```{r time_bins }
@@ -102,7 +108,7 @@ census <-
          Num_Commuters = B08012_001E,
          Means_of_Transport = B08301_001E,
          Total_Public_Trans = B08301_010E) %>%
-  select(Total_Pop, Med_Inc, White_Pop, Travel_Time,
+  dplyr::select(Total_Pop, Med_Inc, White_Pop, Travel_Time,
          Means_of_Transport, Total_Public_Trans,
          Med_Age,
          GEOID, geometry) %>%
@@ -116,7 +122,7 @@ tracts <-
   census %>%
   as.data.frame() %>%
   distinct(GEOID, .keep_all = TRUE) %>%
-  select(GEOID, geometry) %>% 
+  dplyr::select(GEOID, geometry) %>% 
   st_sf
 
 ```
@@ -146,7 +152,7 @@ dat_census <- st_join(dat2 %>%
   mutate(end_lon = unlist(map(geometry, 1)),
          end_lat = unlist(map(geometry, 2)))%>%
   as.data.frame() %>%
-  select(-geometry)
+  dplyr::select(-geometry)
 ```
 
 ```{r import_weather, message = FALSE, warning = FALSE }
@@ -262,7 +268,7 @@ ggplot()+
               group_by(start_station, start_lat, start_lon, weekend, time_of_day) %>%
               tally(),
             aes(x=start_lon, y = start_lat, color = n), 
-            fill = "transparent", alpha = 0.4, size = 0.3)+
+            fill = "transparent", alpha = 0.6, size = 0.8)+
   scale_colour_viridis(direction = -1,
   discrete = FALSE, option = "D")+
   ylim(min(dat_census$start_lat), max(dat_census$start_lat))+
@@ -271,3 +277,328 @@ ggplot()+
   labs(title="Bike share trips per hr by station. Philadelphia, Aug-Sep, 2023")+
   mapTheme
 ```
+
+```{r amenity_features}
+# parks <- 
+#   st_read("https://opendata.arcgis.com/datasets/d52445160ab14380a673e5849203eb64_0.geojson", 
+#           quiet = TRUE) %>%
+#   st_transform('ESRI:102729')
+# 
+# parks4buff <- parks %>% dplyr::select(geometry)
+# 
+# #parks within 1/2 mile
+# dat_census$parks.Buffer <- dat_census %>% 
+#     st_as_sf(., coords = c("start_lon", "start_lat"), crs = 4326) %>%
+#     st_transform('ESRI:102729') %>%
+#     st_buffer(2640) %>% 
+#     aggregate(mutate(parks4buff, counter = 1),., sum) %>%
+#     pull(counter)
+# 
+# dat_census <- dat_census %>% mutate(parks.Buffer = replace_na(parks.Buffer, 0))
+# 
+# subway <- st_read("Highspeed_Stations.geojson", quiet = TRUE) %>%
+#   st_transform('ESRI:102729') %>%
+#   dplyr::select(geometry)
+# trolley <- st_read("Trolley_Stations.geojson", quiet = TRUE) %>%
+#   st_transform('ESRI:102729') %>%
+#   dplyr::select(geometry)
+# rr <- st_read("Regional_Rail_Stations.geojson", quiet = TRUE) %>%
+#   st_transform('ESRI:102729') %>%
+#   dplyr::select(geometry)
+# septa <- rbind(subway, trolley, rr)
+# 
+# dat_census <-
+#   dat_census %>% 
+#   st_as_sf(., coords = c("start_lon", "start_lat"), crs = 4326, remove=FALSE) %>%
+#   st_transform('ESRI:102729')
+# 
+# dat_census <-
+#   dat_census %>% 
+#     mutate(
+#       septa_nn1 = nn_function(st_coordinates(dat_census), 
+#                               st_coordinates(septa), k = 1),
+#       
+#       septa_nn2 = nn_function(st_coordinates(dat_census), 
+#                               st_coordinates(septa), k = 2), 
+#       
+#       septa_nn3 = nn_function(st_coordinates(dat_census), 
+#                               st_coordinates(septa), k = 3), 
+#       
+#       septa_nn4 = nn_function(st_coordinates(dat_census), 
+#                               st_coordinates(septa), k = 4), 
+#       
+#       septa_nn5 = nn_function(st_coordinates(dat_census), 
+#                               st_coordinates(septa), k = 5))
+# 
+# dat_census <- dat_census %>%
+#   st_drop_geometry()
+
+```
+
+```{r panel_length_check , message = FALSE, warning = FALSE}
+#unique hours and unique stations
+length(unique(dat_census$interval60)) * length(unique(dat_census$start_station))
+
+
+study.panel <- 
+  expand.grid(interval60=unique(dat_census$interval60), 
+              start_station = unique(dat_census$start_station)) %>%
+  left_join(., dat_census %>%
+              select(start_station, Origin.Tract, start_lon, start_lat)%>%
+              distinct() %>%
+              group_by(start_station) %>%
+              slice(1))
+
+nrow(study.panel)      
+```
+
+```{r create_panel , message = FALSE}
+ride.panel <- 
+  dat_census %>%
+  mutate(Trip_Counter = 1) %>%
+  right_join(study.panel) %>% 
+  group_by(interval60, start_station, Origin.Tract, start_lon, start_lat) %>%
+  summarize(Trip_Count = sum(Trip_Counter, na.rm=T)) %>%
+  left_join(weather.Panel) %>%
+  ungroup() %>%
+  filter(is.na(start_station) == FALSE) %>%
+  mutate(week = week(interval60),
+         dotw = wday(interval60, label = TRUE)) %>%
+  filter(is.na(Origin.Tract) == FALSE)
+```
+
+```{r census_and_panel , message = FALSE}
+ride.panel <- 
+  left_join(ride.panel, census %>%
+              as.data.frame() %>%
+              select(-geometry), by = c("Origin.Tract" = "GEOID"))
+```
+
+```{r amenities}
+parks <- 
+  st_read("https://opendata.arcgis.com/datasets/d52445160ab14380a673e5849203eb64_0.geojson", 
+          quiet = TRUE) %>%
+  st_transform('ESRI:102729')
+
+parks4buff <- parks %>% dplyr::select(geometry)
+
+#parks within 1/2 mile
+ride.panel$parks.Buffer <- ride.panel %>% 
+    st_as_sf(., coords = c("start_lon", "start_lat"), crs = 4326) %>%
+    st_transform('ESRI:102729') %>%
+    st_buffer(2640) %>% 
+    aggregate(mutate(parks4buff, counter = 1),., sum) %>%
+    pull(counter)
+
+ride.panel <- ride.panel %>% mutate(parks.Buffer = replace_na(parks.Buffer, 0))
+
+subway <- st_read("Highspeed_Stations.geojson", quiet = TRUE) %>%
+  st_transform('ESRI:102729') %>%
+  dplyr::select(geometry)
+trolley <- st_read("Trolley_Stations.geojson", quiet = TRUE) %>%
+  st_transform('ESRI:102729') %>%
+  dplyr::select(geometry)
+rr <- st_read("Regional_Rail_Stations.geojson", quiet = TRUE) %>%
+  st_transform('ESRI:102729') %>%
+  dplyr::select(geometry)
+septa <- rbind(subway, trolley, rr)
+
+ride.panel <-
+  ride.panel %>% 
+  st_as_sf(., coords = c("start_lon", "start_lat"), crs = 4326, remove=FALSE) %>%
+  st_transform('ESRI:102729')
+
+ride.panel <-
+  ride.panel %>% 
+    mutate(
+      septa_nn1 = nn_function(st_coordinates(ride.panel), 
+                              st_coordinates(septa), k = 1),
+      
+      septa_nn2 = nn_function(st_coordinates(ride.panel), 
+                              st_coordinates(septa), k = 2), 
+      
+      septa_nn3 = nn_function(st_coordinates(ride.panel), 
+                              st_coordinates(septa), k = 3), 
+      
+      septa_nn4 = nn_function(st_coordinates(ride.panel), 
+                              st_coordinates(septa), k = 4), 
+      
+      septa_nn5 = nn_function(st_coordinates(ride.panel), 
+                              st_coordinates(septa), k = 5))
+
+ride.panel <- ride.panel %>%
+  st_drop_geometry()
+
+```
+
+```{r plot_amenities}
+ggplot() +
+  geom_sf(data = tracts %>%
+          st_transform(crs=4326) , fill = "lightgray") +
+  geom_sf(data = ride.panel %>% group_by(start_station) %>%
+            st_as_sf(., coords = c("start_lon", "start_lat"), crs = 4326, remove=FALSE), 
+          aes(colour = q5(parks.Buffer)), 
+          show.legend = "point", size = .75) +
+  scale_colour_manual(values = palette5,
+                   labels=qBr(ride.panel,"parks.Buffer"),
+                   name="Quintile\nBreaks") +
+  labs(title="PPR Parks within 1/2 Mile of Bike Station, Philadelphia",
+       caption = "Figure X. Data from OpenDataPhilly.org.") +
+ 
+  mapTheme +
+  guides(colour = guide_legend(override.aes = list(size=4)))
+
+ggplot() +
+  geom_sf(data = tracts %>%
+          st_transform(crs=4326) , fill = "lightgray") +
+  geom_sf(data = ride.panel %>% group_by(start_station) %>%
+            st_as_sf(., coords = c("start_lon", "start_lat"), crs = 4326, remove=FALSE), 
+          aes(colour = q5(septa_nn3)), 
+          show.legend = "point", size = .75) +
+  scale_colour_manual(values = palette5_2,
+                   labels=qBr(ride.panel,"septa_nn3"),
+                   name="Quintile\nBreaks") +
+  labs(title="k=3 Nearest Neighbor Score for Septa Rail Stations, Philadelphia",
+       caption = "Figure X. Data from xxx.") +
+  mapTheme +
+  guides(colour = guide_legend(override.aes = list(size=4)))
+```
+
+```{r weather_plot}
+ggplot(ride.panel %>%
+         group_by(Wind_Speed) %>%
+         summarise(count = sum(Trip_Count))) +
+  geom_point(aes(x = Wind_Speed, y = count))+
+  labs(title="Bike share trips per wind speed, Philadelphia, Aug-Sep, 2023",
+       x="Wind Speed", 
+       y="Number of trips")+
+  plotTheme
+
+```
+
+
+### Create time lags
+
+```{r time_lags , message = FALSE}
+ride.panel <- 
+  ride.panel %>% 
+  arrange(start_station, interval60) %>% 
+  mutate(lagHour = dplyr::lag(Trip_Count,1),
+         lag2Hours = dplyr::lag(Trip_Count,2),
+         lag3Hours = dplyr::lag(Trip_Count,3),
+         lag4Hours = dplyr::lag(Trip_Count,4),
+         lag12Hours = dplyr::lag(Trip_Count,12),
+         lag1day = dplyr::lag(Trip_Count,24),
+         holiday = ifelse(yday(interval60) == 247,1,0)) %>%
+   mutate(day = yday(interval60)) %>%
+   mutate(holidayLag = case_when(dplyr::lag(holiday, 1) == 1 ~ "PlusOneDay",
+                                 dplyr::lag(holiday, 2) == 1 ~ "PlustTwoDays",
+                                 dplyr::lag(holiday, 3) == 1 ~ "PlustThreeDays",
+                                 dplyr::lead(holiday, 1) == 1 ~ "MinusOneDay",
+                                 dplyr::lead(holiday, 2) == 1 ~ "MinusTwoDays",
+                                 dplyr::lead(holiday, 3) == 1 ~ "MinusThreeDays"),
+         holidayLag = ifelse(is.na(holidayLag) == TRUE, 0, holidayLag))
+
+```
+
+```{r evaluate_lags , warning = FALSE, message = FALSE}
+as.data.frame(ride.panel) %>%
+    group_by(interval60) %>% 
+    summarise_at(vars(starts_with("lag"), "Trip_Count"), mean, na.rm = TRUE) %>%
+    gather(Variable, Value, -interval60, -Trip_Count) %>%
+    mutate(Variable = factor(Variable, levels=c("lagHour","lag2Hours","lag3Hours","lag4Hours",
+                                                "lag12Hours","lag1day")))%>%
+    group_by(Variable) %>%  
+    summarize(correlation = round(cor(Value, Trip_Count),2))
+```
+
+### Run the models
+
+```{r train_test }
+ride.Train <- filter(ride.panel, week >= 34)
+ride.Test <- filter(ride.panel, week < 34)
+```
+
+
+```{r five_models }
+reg1 <- 
+  lm(Trip_Count ~  hour(interval60) + dotw + Heat_Index,  data=ride.Train)
+
+reg2 <- 
+  lm(Trip_Count ~  start_station + dotw + Heat_Index + parks.Buffer + septa_nn3,  data=ride.Train)
+
+reg3 <- 
+  lm(Trip_Count ~  start_station + hour(interval60) + dotw + Heat_Index + Precipitation + 
+       parks.Buffer + septa_nn3, 
+     data=ride.Train)
+
+reg4 <- 
+  lm(Trip_Count ~  start_station +  hour(interval60) + dotw + Heat_Index + Precipitation + 
+       parks.Buffer + septa_nn3 +
+                   lagHour + lag2Hours + lag1day, 
+     data=ride.Train)
+
+reg5 <- 
+  lm(Trip_Count ~  start_station + hour(interval60) + dotw + Heat_Index + Precipitation +
+       parks.Buffer + septa_nn3 +
+                   lagHour + lag2Hours + lag1day + holidayLag + holiday, 
+     data=ride.Train)
+```
+
+```{r nest_data , warning = FALSE, message = FALSE}
+ride.Test.weekNest <- 
+  ride.Test %>%
+  nest(-week) 
+```
+
+```{r predict_function }
+model_pred <- function(dat, fit){
+   pred <- predict(fit, newdata = dat)}
+```
+
+```{r do_predicitons }
+week_predictions <- 
+  ride.Test.weekNest %>% 
+    mutate(ATime_FE = map(.x = data, fit = reg1, .f = model_pred),
+           BSpace_FE = map(.x = data, fit = reg2, .f = model_pred),
+           CTime_Space_FE = map(.x = data, fit = reg3, .f = model_pred),
+           DTime_Space_FE_timeLags = map(.x = data, fit = reg4, .f = model_pred),
+           ETime_Space_FE_timeLags_holidayLags = map(.x = data, fit = reg5, .f = model_pred)) %>% 
+    gather(Regression, Prediction, -data, -week) %>%
+    mutate(Observed = map(data, pull, Trip_Count),
+           Absolute_Error = map2(Observed, Prediction,  ~ abs(.x - .y)),
+           MAE = map_dbl(Absolute_Error, mean, na.rm = TRUE),
+           sd_AE = map_dbl(Absolute_Error, sd, na.rm = TRUE))
+
+week_predictions
+```
+
+### Errors
+
+```{r plot_errors_by_model }
+week_predictions %>%
+  dplyr::select(week, Regression, MAE) %>%
+  gather(Variable, MAE, -Regression, -week) %>%
+  ggplot(aes(week, MAE)) + 
+    geom_bar(aes(fill = Regression), position = "dodge", stat="identity") +
+    scale_fill_manual(values = palette5) +
+    labs(title = "Mean Absolute Errors by model specification and week") +
+  plotTheme
+```
+
+```{r error_vs_actual_timeseries , warning = FALSE, message = FALSE}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station = map(data, pull, start_station)) %>%
+    dplyr::select(interval60, start_station, Observed, Prediction, Regression) %>%
+    unnest() %>%
+    gather(Variable, Value, -Regression, -interval60, -start_station) %>%
+    group_by(Regression, Variable, interval60) %>%
+    summarize(Value = sum(Value)) %>%
+    ggplot(aes(interval60, Value, colour=Variable)) + 
+      geom_line(size = 1.1) + 
+      facet_wrap(~Regression, ncol=1) +
+      labs(title = "Predicted/Observed bike share time series", subtitle = "Philadelphia; A test set of 2 weeks",  x = "Hour", y= "Station Trips") +
+      plotTheme
+```
+
