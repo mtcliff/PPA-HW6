@@ -23,6 +23,7 @@ library(kableExtra)
 library(RSocrata)
 library(mapview)
 library(FNN)
+library(caret)
 
 root.dir = "https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/DATA/"
 source("https://raw.githubusercontent.com/urbanSpatial/Public-Policy-Analytics-Landing/master/functions.r")
@@ -466,11 +467,11 @@ ggplot() +
 
 ```{r weather_plot}
 ggplot(ride.panel %>%
-         group_by(Wind_Speed) %>%
+         group_by(Temperature) %>%
          summarise(count = sum(Trip_Count))) +
-  geom_point(aes(x = Wind_Speed, y = count))+
-  labs(title="Bike share trips per wind speed, Philadelphia, Aug-Sep, 2023",
-       x="Wind Speed", 
+  geom_point(aes(x = Temperature, y = count))+
+  labs(title="Bike share trips per temperature, Philadelphia, Aug-Sep, 2023",
+       x="Temperature", 
        y="Number of trips")+
   plotTheme
 
@@ -602,3 +603,163 @@ week_predictions %>%
       plotTheme
 ```
 
+### Space-time errors
+
+```{r errors_by_station, warning = FALSE, message = FALSE }
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station = map(data, pull, start_station), 
+           start_lat = map(data, pull, start_lat), 
+           start_lon = map(data, pull, start_lon)) %>%
+    select(interval60, start_station, start_lon, start_lat, Observed, Prediction, Regression) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags") %>%
+  group_by(start_station, start_lon, start_lat) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+ggplot(.)+
+  geom_sf(data = census, color = "grey", fill = "transparent")+
+  geom_point(aes(x = start_lon, y = start_lat, color = MAE), 
+             fill = "transparent", alpha = 0.4)+
+  scale_colour_viridis(direction = -1,
+  discrete = FALSE, option = "D")+
+  ylim(min(dat_census$start_lat), max(dat_census$start_lat))+
+  xlim(min(dat_census$start_lon), max(dat_census$start_lon))+
+  labs(title="Mean Abs Error, Test Set, Model 4")+
+  mapTheme
+```
+
+```{r obs_vs_pred}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station = map(data, pull, start_station), 
+           start_lat = map(data, pull, start_lat), 
+           start_lon = map(data, pull, start_lon),
+           dotw = map(data, pull, dotw)) %>%
+    select(interval60, start_station, start_lon, 
+           start_lat, Observed, Prediction, Regression,
+           dotw) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush"))%>%
+  ggplot()+
+  geom_point(aes(x= Observed, y = Prediction))+
+    geom_smooth(aes(x= Observed, y= Prediction), method = "lm", se = FALSE, color = "red")+
+    geom_abline(slope = 1, intercept = 0)+
+  facet_grid(time_of_day~weekend)+
+  labs(title="Observed vs Predicted",
+       x="Observed trips", 
+       y="Predicted trips")+
+  plotTheme
+
+```
+
+```{r mae_map}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station = map(data, pull, start_station), 
+           start_lat = map(data, pull, start_lat), 
+           start_lon = map(data, pull, start_lon),
+           dotw = map(data, pull, dotw) ) %>%
+    select(interval60, start_station, start_lon, 
+           start_lat, Observed, Prediction, Regression,
+           dotw) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush")) %>%
+  group_by(start_station, weekend, time_of_day, start_lon, start_lat) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+  ggplot(.)+
+  geom_sf(data = census, color = "grey", fill = "transparent")+
+  geom_point(aes(x = start_lon, y = start_lat, color = MAE), 
+             fill = "transparent", size = 0.8, alpha = 0.4)+
+  scale_colour_viridis(direction = -1,
+  discrete = FALSE, option = "D")+
+  ylim(min(dat_census$start_lat), max(dat_census$start_lat))+
+  xlim(min(dat_census$start_lon), max(dat_census$start_lon))+
+  facet_grid(weekend~time_of_day)+
+  labs(title="Mean Absolute Errors, Test Set")+
+  mapTheme
+
+```
+
+```{r generalize}
+week_predictions %>% 
+    mutate(interval60 = map(data, pull, interval60),
+           start_station = map(data, pull, start_station), 
+           start_lat = map(data, pull, start_lat), 
+           start_lon = map(data, pull, start_lon),
+           dotw = map(data, pull, dotw),
+           Percent_Taking_Public_Trans = map(data, pull, Percent_Taking_Public_Trans),
+           Med_Inc = map(data, pull, Med_Inc),
+           Percent_White = map(data, pull, Percent_White)) %>%
+    select(interval60, start_station, start_lon, 
+           start_lat, Observed, Prediction, Regression,
+           dotw, Percent_Taking_Public_Trans, Med_Inc, Percent_White) %>%
+    unnest() %>%
+  filter(Regression == "DTime_Space_FE_timeLags")%>%
+  mutate(weekend = ifelse(dotw %in% c("Sun", "Sat"), "Weekend", "Weekday"),
+         time_of_day = case_when(hour(interval60) < 7 | hour(interval60) > 18 ~ "Overnight",
+                                 hour(interval60) >= 7 & hour(interval60) < 10 ~ "AM Rush",
+                                 hour(interval60) >= 10 & hour(interval60) < 15 ~ "Mid-Day",
+                                 hour(interval60) >= 15 & hour(interval60) <= 18 ~ "PM Rush")) %>%
+  filter(time_of_day == "AM Rush") %>%
+  group_by(start_station, Percent_Taking_Public_Trans, Med_Inc, Percent_White) %>%
+  summarize(MAE = mean(abs(Observed-Prediction), na.rm = TRUE))%>%
+  gather(-start_station, -MAE, key = "variable", value = "value")%>%
+  ggplot(.)+
+  #geom_sf(data = chicagoCensus, color = "grey", fill = "transparent")+
+  geom_point(aes(x = value, y = MAE), alpha = 0.4)+
+  geom_smooth(aes(x = value, y = MAE), method = "lm", se= FALSE)+
+  facet_wrap(~variable, scales = "free")+
+  labs(title="Errors as a function of socio-economic variables",
+       y="Mean Absolute Error (Trips)")+
+  plotTheme
+
+```
+
+### Cross-validation
+
+```{r cv}
+## define the variables we want
+reg.vars <- c("start_station", "hour(interval60)", "dotw", "Heat_Index", "Precipitation",
+              "lagHour", "lag2Hours", "lag1day")
+
+ride.panel.cv <- ride.panel %>%
+  mutate(cvID = sample(round(nrow(ride.panel) / 100), 
+                       size=nrow(ride.panel), replace = TRUE))
+
+## RUN REGRESSIONS
+#k-fold
+reg.CV <- crossValidate(
+  dataset = ride.panel,
+  id = "cvID",                           
+  dependentVariable = "Trip_Count",
+  indVariables = reg.vars) %>%
+    dplyr::select(cvID, Trip_Count, Prediction, geometry)
+
+
+fitControl <- trainControl(method = "cv", number = 100)
+set.seed(825)
+
+reg.CV <- 
+  train(Trip_Count ~  start_station + hour(interval60) + dotw + 
+          Heat_Index + Precipitation + lagHour + lag2Hours + lag1day,
+        data = ride.panel,
+        method = "lm", trControl = fitControl, na.action = na.pass)
+
+ggplot(reg.CV$resample, aes(x=MAE)) +
+  geom_histogram(fill = "#08519c", color = "white") +
+  labs(
+    title = "Distribution of MAE Across 100-Fold Cross Validation",
+    subtitle = "",
+    caption = "Figure 10")
+
+```
